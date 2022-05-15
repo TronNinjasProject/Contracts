@@ -1,0 +1,390 @@
+pragma solidity >=0.5.0 <0.6.0;
+
+contract ITRC20 {
+function transferFrom(address from, address to, uint256 value) external returns (bool); 
+function transfer(address to, uint256 value) external returns (bool);
+function balanceOf(address who) external view returns (uint256);
+function totalSupply() external view returns (uint256);
+function allowance(address owner, address spender) external view returns (uint256); 
+function approve(address spender, uint256 value) external returns (bool);
+event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+
+contract FailSafe{
+    address public admin;
+    constructor() public{
+        admin = msg.sender;
+    }
+    
+    function FailSafeTrxRemove(uint amountInSun) external{
+        require(msg.sender == admin, "Not admin");
+        address(uint160(admin)).transfer(amountInSun);
+    }
+    function FailSafeTRC10Remove(uint tokenID, uint amount) external{
+        require(msg.sender == admin, "Not admin");
+        address(uint160(admin)).transferToken(amount, tokenID);
+    }
+    function FailSafeStopContract() external{
+        require(msg.sender == admin, "Not admin");
+        selfdestruct(address(uint160(admin)));
+    }
+    function FailSafeTRC20Remove(address contractAddress, uint amountWithPrecision) external{
+        require(msg.sender == admin, "Not admin");
+        ITRC20(contractAddress).transfer(admin, amountWithPrecision);
+    }
+    function FailSafeTRC721Remove(address contractAddress, uint tokenID) external{
+        require(msg.sender == admin, "Not admin");
+        IERC721(contractAddress).transferFrom(address(this), admin, tokenID);
+    }
+    function changeAdminFS(address newAdmin) external{
+        require(msg.sender == admin);
+        admin = newAdmin;
+    }
+}
+
+
+contract IERC721 {
+    function balanceOf(address owner) external view returns (uint256 balance);
+    function ownerOf(uint256 tokenId) external view returns (address owner);
+    function safeTransferFrom(address from, address to, uint256 tokenId) external;
+    function safeTransferFrom(address from, address to, uint256 tokenId, bytes calldata data) external;
+    function transferFrom(address from, address to, uint256 tokenId) external;
+    function approve(address to, uint256 tokenId) external;
+    function getApproved(uint256 tokenId) external view returns (address operator);
+    function setApprovalForAll(address operator, bool _approved) external;
+    function isApprovedForAll(address owner, address operator) external view returns (bool);
+    function tokenURI(uint256 tokenId) external view returns (string memory);
+}
+
+contract staking is FailSafe{
+    using SafeMath for uint;
+    struct Pool{
+        address token;
+        uint tokensStaked;
+        uint accTrxPerShare; 
+        uint accTokensPerShare;
+    }
+    //Staking ----
+    Pool public nftPool;
+    Pool public tokenPool;
+    Pool public lpPool;
+    uint public overflowTRX;
+    uint public overflowTokens;
+    uint public TrxPrice=20000000;
+    ITRC20 rewardToken;
+    uint public rewardPercentTrx = 10;
+    uint public rewardPercentTnt = 10;
+    uint public NFTPercentage = 10;
+    uint public TokenPercentage = 40;
+    uint public LPPercentage = 50;
+
+    struct User{
+        mapping(uint => bool) NFTIDs;
+        uint[] NFTs;
+        mapping(uint => uint) NFTIDLocation;
+        uint nftTotalStaked;
+        uint tokenTotalStaked;
+        uint lpTotalStaked;
+        uint NftTrxRewardDebt;
+        uint NftTokenRewardDebt;
+        uint TokenTrxRewardDebt;
+        uint TokenTokenRewardDebt;
+        uint LpTrxRewardDebt;
+        uint LpTokenRewardDebt;
+    }
+    mapping(address => User) public users;
+    constructor(address NFTToken, address tokenAddress, address ICOAddr, address lpAddress) public{
+        nftPool.token = NFTToken;
+        tokenPool.token = tokenAddress;
+        lpPool.token = lpAddress;
+        whitelist[ICOAddr] = true;
+        whitelist[msg.sender] = true;
+        rewardToken = ITRC20(tokenAddress);
+    }
+
+    function updateRewardPercentage(uint trxpercentage, uint tntpercentage) public{
+        require(whitelist[msg.sender], "No ownership");
+        rewardPercentTrx = trxpercentage;
+        rewardPercentTnt = tntpercentage;
+    }
+    function updateTrxPrice(uint price) public{
+        require(whitelist[msg.sender], "No ownership");
+        TrxPrice = price;
+    }
+    function updatePoolPercentages(uint _NFTpercentage, uint _TokenPercentage, uint _LPPercentage) public{
+        require(whitelist[msg.sender], "No ownership");
+        NFTPercentage = _NFTpercentage;
+        TokenPercentage = _TokenPercentage;
+        LPPercentage = _LPPercentage;
+        require(_NFTpercentage.add(_TokenPercentage).add(_LPPercentage) == 100, "Percentages should add up to 100");
+    }
+    
+    
+    function addRewardsTRX() public payable{
+      
+        require(whitelist[msg.sender], "No ownership");
+        if(nftPool.tokensStaked>0){
+            nftPool.accTrxPerShare += (msg.value.mul(1e12).mul(NFTPercentage)).div(100).div(nftPool.tokensStaked); 
+        }else{
+            overflowTRX += (msg.value.mul(NFTPercentage)).div(100);
+        }
+        if(tokenPool.tokensStaked>0){
+            tokenPool.accTrxPerShare += (msg.value.mul(1e12).mul(TokenPercentage)).div(100).div(tokenPool.tokensStaked);
+        }else{
+            overflowTRX += (msg.value.mul(TokenPercentage)).div(100);
+        }
+        if(lpPool.tokensStaked>0){
+            lpPool.accTrxPerShare += (msg.value.mul(1e12).mul(LPPercentage)).div(100).div(lpPool.tokensStaked);
+        }else{
+            overflowTRX += (msg.value.mul(LPPercentage)).div(100);
+        }
+    }
+    function addRewardsTRC20(uint tokensBought) public{
+        require(whitelist[msg.sender], "No ownership");
+        if(nftPool.tokensStaked>0){
+            nftPool.accTokensPerShare += (((tokensBought.mul(rewardPercentTnt)).div(100)).mul(1e12).mul(NFTPercentage)).div(100).div(nftPool.tokensStaked); 
+        }else{
+            overflowTokens += (((tokensBought.mul(rewardPercentTnt)).div(100)).mul(NFTPercentage)).div(100);
+        }
+        if(tokenPool.tokensStaked>0){
+            tokenPool.accTokensPerShare += (((tokensBought.mul(rewardPercentTnt)).div(100)).mul(1e12).mul(TokenPercentage)).div(100).div(tokenPool.tokensStaked);
+        }else{
+            overflowTokens += (((tokensBought.mul(rewardPercentTnt)).div(100)).mul(TokenPercentage)).div(100);
+        }
+        if(lpPool.tokensStaked>0){
+            lpPool.accTokensPerShare += (((tokensBought.mul(rewardPercentTnt)).div(100)).mul(1e12).mul(LPPercentage)).div(100).div(lpPool.tokensStaked);
+        }else{
+            overflowTokens += (((tokensBought.mul(rewardPercentTnt)).div(100)).mul(LPPercentage)).div(100);
+        }
+    }
+    
+    function depositNFT(uint tokenID) public {
+        IERC721(nftPool.token).transferFrom(msg.sender, address(this), tokenID); 
+        User storage curUser = users[msg.sender];
+        if (curUser.nftTotalStaked > 0) {
+            (uint256 pendingTRX, uint256 pendingToken) = nftClaimableRewards(msg.sender);
+            msg.sender.transfer(pendingTRX);
+            rewardToken.transfer(address(msg.sender), pendingToken);
+        }
+        curUser.nftTotalStaked += 1; 
+        curUser.NFTIDs[tokenID] = true;
+        curUser.NFTs.push(tokenID);
+        curUser.NFTIDLocation[tokenID] = curUser.NFTs.length-1;
+        curUser.NftTrxRewardDebt = (nftPool.accTrxPerShare.mul(curUser.nftTotalStaked)).div(1e12);
+        curUser.NftTokenRewardDebt = (nftPool.accTokensPerShare.mul(curUser.nftTotalStaked)).div(1e12);
+        nftPool.tokensStaked += 1;
+    }
+    
+    function depositTokens(uint amountOfTokens) public {
+        require(ITRC20(tokenPool.token).transferFrom(msg.sender, address(this), amountOfTokens));
+        User storage curUser = users[msg.sender];
+        if (curUser.tokenTotalStaked > 0) {
+            (uint256 pendingTRX, uint256 pendingToken) = tokenClaimableRewards(msg.sender);
+            msg.sender.transfer(pendingTRX);
+            rewardToken.transfer(address(msg.sender), pendingToken);
+        }
+        curUser.tokenTotalStaked += amountOfTokens;
+        curUser.TokenTrxRewardDebt = (tokenPool.accTrxPerShare.mul(curUser.tokenTotalStaked)).div(1e12); 
+        curUser.TokenTokenRewardDebt = (tokenPool.accTokensPerShare.mul(curUser.tokenTotalStaked)).div(1e12); 
+        tokenPool.tokensStaked += amountOfTokens;
+    }
+    
+    function depositLP(uint amountOfTokens) public {
+        require(ITRC20(lpPool.token).transferFrom(msg.sender, address(this), amountOfTokens));
+        User storage curUser = users[msg.sender];
+        if (curUser.lpTotalStaked > 0) {
+            (uint256 pendingTRX, uint256 pendingToken) = lpClaimableRewards(msg.sender);
+            msg.sender.transfer(pendingTRX);
+            rewardToken.transfer(address(msg.sender), pendingToken);
+        }
+        curUser.lpTotalStaked += amountOfTokens;
+        curUser.LpTrxRewardDebt = (lpPool.accTrxPerShare.mul(curUser.lpTotalStaked)).div(1e12); 
+        curUser.LpTokenRewardDebt = (lpPool.accTokensPerShare.mul(curUser.lpTotalStaked)).div(1e12); 
+        lpPool.tokensStaked += amountOfTokens;
+    }
+    
+    function withdrawLp(uint256 _amount) public {
+        User storage curUser = users[msg.sender];
+        require(curUser.lpTotalStaked >= _amount, "withdraw: not good");
+        (uint256 pendingTRX, uint256 pendingToken) = lpClaimableRewards(msg.sender);
+        msg.sender.transfer(pendingTRX);
+        rewardToken.transfer(address(msg.sender), pendingToken);
+        
+        curUser.lpTotalStaked = curUser.lpTotalStaked.sub(_amount);
+        curUser.LpTrxRewardDebt = (lpPool.accTrxPerShare.mul(curUser.tokenTotalStaked)).div(1e12); 
+        curUser.LpTokenRewardDebt = (lpPool.accTokensPerShare.mul(curUser.tokenTotalStaked)).div(1e12); 
+        lpPool.tokensStaked -= _amount;
+        ITRC20(lpPool.token).transfer(address(msg.sender), _amount);
+    }
+    
+    function withdrawTokens(uint256 _amount) public {
+        User storage curUser = users[msg.sender];
+        require(curUser.tokenTotalStaked >= _amount, "withdraw: not good");
+        (uint256 pendingTRX, uint256 pendingToken) = tokenClaimableRewards(msg.sender);
+        msg.sender.transfer(pendingTRX);
+        rewardToken.transfer(address(msg.sender), pendingToken);
+        
+        curUser.tokenTotalStaked = curUser.tokenTotalStaked.sub(_amount);
+        curUser.TokenTrxRewardDebt = (tokenPool.accTrxPerShare.mul(curUser.tokenTotalStaked)).div(1e12); 
+        curUser.TokenTokenRewardDebt = (tokenPool.accTokensPerShare.mul(curUser.tokenTotalStaked)).div(1e12); 
+        tokenPool.tokensStaked -= _amount;
+        ITRC20(tokenPool.token).transfer(address(msg.sender), _amount);
+    }
+    
+    function withdrawNFT(uint256 tokenID) public {
+        User storage curUser = users[msg.sender];
+        require(curUser.NFTIDs[tokenID] = true, "withdraw: not good");
+        (uint256 pendingTRX, uint256 pendingToken) = nftClaimableRewards(msg.sender);
+        msg.sender.transfer(pendingTRX);
+        rewardToken.transfer(address(msg.sender), pendingToken);
+        
+        curUser.NFTIDs[tokenID] = false;
+        delete curUser.NFTs[curUser.NFTIDLocation[tokenID]];
+        delete curUser.NFTIDLocation[tokenID];
+        curUser.nftTotalStaked = curUser.nftTotalStaked.sub(1);
+        curUser.NftTrxRewardDebt = (nftPool.accTrxPerShare.mul(curUser.nftTotalStaked)).div(1e12); 
+        curUser.NftTokenRewardDebt = (nftPool.accTokensPerShare.mul(curUser.nftTotalStaked)).div(1e12); 
+        nftPool.tokensStaked -= 1;
+        IERC721(nftPool.token).transferFrom(address(this), address(msg.sender), tokenID);
+    }
+    
+    function lpClaimRewards() public {
+        User storage curUser = users[msg.sender];
+        (uint256 pendingTRX, uint256 pendingToken) = lpClaimableRewards(msg.sender);
+        msg.sender.transfer(pendingTRX);
+        rewardToken.transfer(address(msg.sender), pendingToken);
+        curUser.LpTrxRewardDebt = (lpPool.accTrxPerShare.mul(curUser.lpTotalStaked)).div(1e12); 
+        curUser.LpTokenRewardDebt = (lpPool.accTokensPerShare.mul(curUser.lpTotalStaked)).div(1e12); 
+    }
+    
+    function tokenClaimRewards() public {
+        User storage curUser = users[msg.sender];
+        (uint256 pendingTrx, uint pendingToken) = tokenClaimableRewards(msg.sender);
+        msg.sender.transfer(pendingTrx);
+        rewardToken.transfer(address(msg.sender), pendingToken);
+        curUser.TokenTrxRewardDebt = (tokenPool.accTrxPerShare.mul(curUser.tokenTotalStaked)).div(1e12); 
+        curUser.TokenTokenRewardDebt = (tokenPool.accTokensPerShare.mul(curUser.tokenTotalStaked)).div(1e12); 
+    }
+    
+    function nftClaimRewards() public {
+        User storage curUser = users[msg.sender];
+        (uint256 pendingTrx, uint pendingToken) = nftClaimableRewards(msg.sender);
+        msg.sender.transfer(pendingTrx);
+        rewardToken.transfer(address(msg.sender), pendingToken);
+        curUser.NftTrxRewardDebt = (nftPool.accTrxPerShare.mul(curUser.nftTotalStaked)).div(1e12); 
+        curUser.NftTokenRewardDebt = (nftPool.accTokensPerShare.mul(curUser.nftTotalStaked)).div(1e12); 
+    }
+    
+    function lpClaimableRewards(address _user) public view returns (uint256 trxReward, uint256 TokenReward){
+        trxReward = (users[_user].lpTotalStaked.mul(lpPool.accTrxPerShare).div(1e12).sub(users[_user].LpTrxRewardDebt));
+        TokenReward = (users[_user].lpTotalStaked.mul(lpPool.accTokensPerShare).div(1e12).sub(users[_user].LpTokenRewardDebt));
+    }
+    function nftClaimableRewards(address _user) public view returns (uint256 trxReward, uint256 TokenReward){
+        trxReward = (users[_user].nftTotalStaked.mul(nftPool.accTrxPerShare).div(1e12).sub(users[_user].NftTrxRewardDebt));
+        TokenReward = (users[_user].nftTotalStaked.mul(nftPool.accTokensPerShare).div(1e12).sub(users[_user].NftTokenRewardDebt));
+    }
+    function tokenClaimableRewards(address _user) public view returns (uint256 trxReward, uint256 TokenReward){
+        trxReward = (users[_user].tokenTotalStaked.mul(tokenPool.accTrxPerShare).div(1e12).sub(users[_user].TokenTrxRewardDebt));
+        TokenReward = (users[_user].tokenTotalStaked.mul(tokenPool.accTokensPerShare).div(1e12).sub(users[_user].TokenTokenRewardDebt));
+    }
+    
+    
+    function withdrawOverflowTrx() public{ //Withdrawing leftover for admin
+        require(whitelist[msg.sender], "No ownership");
+        msg.sender.transfer(overflowTRX);
+        overflowTRX = 0;
+    }
+    function withdrawOverflowTokens() public{ //Withdrawing leftover for admin
+        require(whitelist[msg.sender], "No ownership");
+        rewardToken.transfer(msg.sender, overflowTokens);
+        overflowTokens = 0;
+    }
+    function seeUsersNFTS(address user) external view returns(uint[] memory NFTIDs){
+        NFTIDs = users[user].NFTs;
+    }
+
+
+    //Game Rewards functions ---------------------------
+    mapping(address => uint) public rewards;
+    mapping(address => bool) public whitelist;
+    function addToWL(address addr) public{
+        require(whitelist[msg.sender], "No ownership");
+        whitelist[addr] = true;
+    }
+    
+    function remFromWL(address addr) public{
+        require(whitelist[msg.sender], "No ownership");
+        whitelist[addr] = false;
+    }
+    function addTNTRewards(uint amount) external{
+        require(whitelist[msg.sender], "No ownership");
+        rewardToken.transferFrom(msg.sender, address(this), amount);
+    }
+    function withdrawTNTRewards(uint amount) external{
+        require(whitelist[msg.sender], "No ownership");
+        rewardToken.transfer(admin, amount);
+    }
+    function seeUserClaimableGame(address userAddr) view external returns(uint rewardAmount){
+        rewardAmount = rewards[userAddr];
+    }
+    function addRewardsToUserGame(address userAddr, uint amountGiven) external{
+        require(whitelist[msg.sender], "No ownership");
+        rewards[userAddr] = rewards[userAddr].add(amountGiven);
+    }
+    function reduceRewardsSafe(address userAddr, uint amountReduced) external{
+        require(whitelist[msg.sender], "No ownership");
+        if(amountReduced>rewards[userAddr]){
+            rewards[userAddr] = 0;
+        }else{
+            rewards[userAddr] -= amountReduced;
+        }
+    }
+    function reduceRewards(address userAddr, uint amountReduced) public{
+        require(whitelist[msg.sender], "No ownership");
+        rewards[userAddr] = rewards[userAddr].sub(amountReduced);
+    }
+    function claimRewardsGame() external{
+        require(rewards[msg.sender]>0, "claim not good");
+        rewardToken.transfer(msg.sender, rewards[msg.sender]);
+        rewards[msg.sender]= 0;
+    }
+    
+
+}
+
+//---------------------------SAFE MATH STARTS HERE ---------------------------
+library SafeMath {
+  function mul(uint a, uint b) internal pure  returns (uint) {
+    uint c = a * b;
+    require(a == 0 || c / a == b);
+    return c;
+  }
+  function div(uint a, uint b) internal pure returns (uint) {
+    require(b > 0);
+    uint c = a / b;
+    require(a == b * c + a % b);
+    return c;
+  }
+  function sub(uint a, uint b) internal pure returns (uint) {
+    require(b <= a);
+    return a - b;
+  }
+  function add(uint a, uint b) internal pure returns (uint) {
+    uint c = a + b;
+    require(c >= a);
+    return c;
+  }
+  function max64(uint64 a, uint64 b) internal  pure returns (uint64) {
+    return a >= b ? a : b;
+  }
+  function min64(uint64 a, uint64 b) internal  pure returns (uint64) {
+    return a < b ? a : b;
+  }
+  function max256(uint256 a, uint256 b) internal  pure returns (uint256) {
+    return a >= b ? a : b;
+  }
+  function min256(uint256 a, uint256 b) internal  pure returns (uint256) {
+    return a < b ? a : b;
+  }
+}
